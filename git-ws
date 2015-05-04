@@ -1,0 +1,246 @@
+#!/bin/bash
+
+###############################################################################
+# Globals
+#
+
+CMD_NAME=git
+INCLUDEFILE_NAME=".${CMD_NAME}wsinclude"
+IGNOREFILE_NAME=".${CMD_NAME}wsignore"
+IGNORE_ERRORS=""
+INTERACTIVE=""
+declare -a INCLUDED_DIRS
+declare -a IGNORED_DIRS
+
+
+###############################################################################
+# Functions
+#
+
+die()
+{
+  error "$*"
+  exit 2
+}
+
+error()
+{
+  printf "ERROR: $*\nUse -h for help\n"
+}
+
+help()
+{
+  scriptname=$(basename $0)
+  printf "Usage: $scriptname [-d <dir>] [-f] [-i] <cmd>\n"
+  printf "       $scriptname -l\n"
+  printf "Runs given ${CMD_NAME} command on all ${CMD_NAME} directories in \$GIT_WORKSPACE\n"
+  printf "\nArguments:\n"
+  printf "\n  [-d <dir>] [-f] [-i] <cmd>:\n"
+  printf "      -d <dir>: use given directory instead of \$GIT_WORKSPACE\n"
+  printf "      -f: force - ignore errors if they occur on individual directories\n"
+  printf "      -i: interactive - ask before running command on each directory\n"
+  printf "\n    <cmd>: The ${CMD_NAME} command to execute.\n"
+  printf "           The \'${CMD_NAME}\' part of the command is optional (assumed) and can be left out.\n"
+  printf "\n  -l: list - list the ${CMD_NAME} directories in workspace\n"
+  printf "\nUsing a ${INCLUDEFILE_NAME} file\n"
+  printf "The file \${GIT_WORKSPACE}/${INCLUDEFILE_NAME}, if present, specifies a list of directories to include.\n"
+  printf "If this file is given then only the files listed are included.\n"
+  printf "Use one directory name per line in file, directory name only.\n"
+  printf "\nUsing a ${IGNOREFILE_NAME} file\n"
+  printf "The file \${GIT_WORKSPACE}/${IGNOREFILE_NAME}, if present, specifies a list of directories to ignore.\n"
+  printf "Use one directory name per line in file, directory name only.\n"
+  printf "\nExamples:\n"
+  printf "$scriptname ${CMD_NAME} status     | short form: $scriptname status\n"
+  printf "$scriptname ${CMD_NAME} pull --rebase | short form: $scriptname pull --rebase\n"
+  printf "$scriptname -i commit -am \"WIP: commit checkpoint\"\n"
+  printf "$scriptname -d /path/to/other/workspace status\n"
+  printf "$scriptname -l\n"
+  exit 1
+}
+
+do_cmd_on_dirs()
+{
+  base_dir="$1"
+  cmd="$2"
+  # prepend ${CMD_NAME} to cmd if necessary
+  case "$cmd" in
+    ${CMD_NAME}*)
+      ;;
+    "")
+      #cmd="echo no command"
+      ;;
+    *)
+      cmd="${CMD_NAME} $cmd"
+      ;;
+  esac
+  for d in $base_dir/*; do
+    cd "$base_dir"
+    is_included $(basename $d) included
+    is_ignored $(basename $d) ignored
+    if [ "$included" = "y" ] && [ "$ignored" = "n" ] && [ -d "$d" ] && [ -d "$d/.${CMD_NAME}" ]; then
+      if [ -z "$cmd" ]; then
+        printf "$d\n"
+      else
+        printf "\n$d: $cmd\n"
+      fi
+      get_interactive_resp resp
+      if [ "$resp" = "y" ]; then
+        cd "$d"
+        eval $cmd
+        rc=$?
+        if [ $rc != 0 ]; then
+          printf "\nERROR: Command '$cmd' failed in '$d'\n" 
+          if [ "$IGNORE_ERRORS" != "true" ]; then
+            do_get_interactive_resp resp
+            if [ "$resp" != "y" ]; then
+              exit $rc
+            fi
+          fi
+        fi
+      fi
+    fi
+  done
+  echo "Finished"
+}
+
+is_ignored()
+{
+  local dirname=$1
+  local __resultvar=$2
+  for ignored_dir in "${IGNORED_DIRS[@]}"; do
+    if [ "$dirname" = "$ignored_dir" ]; then
+      eval $__resultvar=y
+      return
+    fi
+  done
+  eval $__resultvar=n
+}
+
+is_included()
+{
+  local dirname=$1
+  local __resultvar=$2
+  if [ ${#INCLUDED_DIRS[@]} -eq 0 ]; then
+    eval $__resultvar=y
+    return
+  fi
+  for included_dir in "${INCLUDED_DIRS[@]}"; do
+    if [ "$dirname" = "$included_dir" ]; then
+      eval $__resultvar=y
+      return
+    fi
+  done
+  eval $__resultvar=n
+}
+
+get_interactive_resp()
+{
+  local __resultvar=$1
+  if [ "$INTERACTIVE" != "true" ]; then
+    eval $__resultvar=y
+    return
+  fi
+  do_get_interactive_resp $__resultvar
+}
+
+do_get_interactive_resp()
+{
+  local __resultvar=$1
+  printf "Continue? (y|n|q) [y]: "
+  read resp
+  case "$resp" in
+    y|"")
+      eval $__resultvar=y
+      ;;
+    q)
+      echo "Aborted. Quitting."
+      exit 1
+      ;;
+    *)
+      eval $__resultvar=n
+      ;;
+  esac
+}
+
+do_list()
+{
+  d="$1"
+  find "$d" -type d -name ".${CMD_NAME}" -exec dirname {} \;
+}
+
+
+###############################################################################
+# Main
+#
+
+# support --help even though getopts doesn't support long parameters
+if [ "$1" = "--help" ]; then
+  help
+fi
+
+dirflag=
+listflag=
+while getopts hfild: name; do
+  case $name in
+    i)
+      INTERACTIVE=true
+      ;;
+    f)
+      IGNORE_ERRORS=true
+      ;;
+    d)
+      dirflag=1
+      DIR="$OPTARG"
+      ;;
+    l)
+      listflag=1
+      ;;
+    h)
+      help
+      ;;
+  esac
+done
+shift $(($OPTIND - 1))
+
+# check for $GIT_WORKSPACE vs -d <dir>, default to current directory if neither
+if [ -z "$dirflag" ]; then
+  if [ -z "$GIT_WORKSPACE" ]; then
+    DIR=$(pwd)
+  else
+    DIR="$GIT_WORKSPACE"
+    if [ ! -d "$GIT_WORKSPACE" ]; then
+      die "GIT_WORKSPACE is set and not a directory: GIT_WORKSPACE=$GIT_WORKSPACE\n"
+    fi
+  fi
+fi
+if [ "$DIR" = "." ]; then
+  DIR=$(pwd)
+fi
+if [ ! -d "$DIR" ]; then
+  die "Not a directory: $DIR\n"
+fi
+
+# if -l then just do the listing and exit
+if [ ! -z "$listflag" ]; then
+  do_list "$DIR"
+  exit 0
+fi
+
+printf "Using workspace: $DIR\n"
+
+INCLUDEFILE="${DIR}/${INCLUDEFILE_NAME}"
+if [ -f "${INCLUDEFILE}" ]; then
+  INCLUDED_DIRS=( $(cat "$INCLUDEFILE") )
+  # strip out commented lines:
+  INCLUDED_DIRS=( ${INCLUDED_DIRS[@]/\#*/} )
+fi
+IGNOREFILE="${DIR}/${IGNOREFILE_NAME}"
+if [ -f "${IGNOREFILE}" ]; then
+  IGNORED_DIRS=( $(cat "$IGNOREFILE") )
+  # strip out commented lines:
+  IGNORED_DIRS=( ${IGNORED_DIRS[@]/\#*/} )
+fi
+
+# combine all remaining args into a single string, then call our function
+args=$*
+do_cmd_on_dirs "$DIR" "$args"
